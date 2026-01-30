@@ -1,13 +1,11 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[4]:
-
-
 import face_recognition
 import cv2
 import pickle 
 import numpy as np
+import requests
+import json
+from collections import defaultdict
+
 class FaceRecognizer:
     def __init__(self, encodings_file):
         self.encodings_file = encodings_file
@@ -16,35 +14,48 @@ class FaceRecognizer:
       
         self.update_count = 0
         self.replace_limit = 2
+        self.pending_updates = []
 
+    def send_unlock_signal(self, name, similarity):
+        url = ""  # Thay thế bằng URL thực tế
+        data = {
+            "status": "unlock",
+            "user": name,
+        }
+        if url:
+            try:
+                response = requests.post(url, json=data)
+            except Exception as e:
+                print("error", e)
         
-    def update_encodings(self, name, new_vectors, max_count = 50):
-        indices = [i for i, n in enumerate(self.known_names) if n == name]
-        
-        if not indices:
-            return
-
-        allowed = self.replace_limit - self.update_count
-        vectors_to_add = new_vectors[:allowed]
-
-        for vec in vectors_to_add:
+   
+    def update_encodings(self, name, new_vectors, max_count=50):
+        for vec in new_vectors:
             self.known_encodings.append(vec)
             self.known_names.append(name)
-            self.update_count += 1
-
-
-        person_indices = [i for i, n in enumerate(self.known_names) if n == name]
-        if len(person_indices) > max_count:
-            extra = len(person_indices) - max_count
-            for i in sorted(person_indices[:extra], reverse=True):
-                del self.known_encodings[i]
-                del self.known_names[i]
-            
+        #sort value in encodings_file
+        grouped = {}
+        for n, vec in zip(self.known_names, self.known_encodings):
+            if n not in grouped:
+                grouped[n] = []
+            grouped[n].append(vec)
+                
+        new_encodings = []
+        new_names = []
+        # cut
+        for n, vecs in grouped.items():
+            if len(vecs) > max_count:
+                vecs = vecs[-max_count:]
+            new_encodings.extend(vecs)
+            new_names.extend([n] * len(vecs))
+                
+        self.known_encodings = new_encodings
+        self.known_names = new_names    
         with open(self.encodings_file, "wb") as f:
             pickle.dump((self.known_encodings, self.known_names), f)
-        #print(f"Đã thêm vector cho {name}, hiện có {len([n for n in self.known_names if n == name])} vector.")
 
-            
+        print(f"Đã thêm vector cho {name}, hiện có {len([n for n in self.known_names if n == name])}/{max_count} vector.")
+    
     def recognize(self, image):
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
@@ -70,16 +81,48 @@ class FaceRecognizer:
                 else:
                     display_name = name
 
-                if similarity >= 80 and matches[best_match_index] and self.replace_limit > self.update_count:
-                    self.update_encodings(name, [face_encoding])
-                    
+                if similarity >= 70 and matches[best_match_index] and len(self.pending_updates) < 3:
+                #     self.update_encodings(name, [face_encoding])
+                    self.pending_updates.append((name, face_encoding))
+                if similarity >= 70 and matches[best_match_index]:
+                    pass
+                    # self.send_unlock_signal(name, similarity)
             results.append(((top, right, bottom, left), name))
 
-            # Vẽ khung và tên lên ảnh
             cv2.rectangle(image, (left, top), (right, bottom), (0, 255, 0), 2)
             cv2.putText(image, display_name, (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 
                         0.8, (0, 255, 0), 2)
         return image, results
+    
+    def recognize_url(self, url):
+        cap = cv2.VideoCapture(0)
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            frame_count += 1
+            if frame_count % 3 == 0:   
+                frame, results = self.recognize(frame)
+                cv2.imshow("ESP32-CAM Recognition", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+        
+        if self.pending_updates:
+            #grouped form { "thanh": [vec1, vec2], "an": [vec3], ... }.
+            grouped = defaultdict(list)
+            for name, vec in self.pending_updates:
+                grouped[name].append(vec)
+
+            for name, vectors in grouped.items():
+                self.update_encodings(name, vectors)
+
+            self.pending_updates.clear()
+            print("done update encodings for all.")
+
+
 # recognizer = FaceRecognizer("encodings.pkl")
 # image, results = recognizer.recognize("C:/Users/ADMIN/OneDrive/Desktop/z7415063940931_4992fc5ac76a26366f13513541be3f49.jpg")
 # cv2.namedWindow("Face Recognition", cv2.WINDOW_NORMAL)
